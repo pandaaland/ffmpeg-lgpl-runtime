@@ -24,25 +24,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-pkgconf
+            diffutils
+            make
+            tar
+            xz
+            curl
+            zip
+
       - name: Build FFmpeg with MSYS2
-        shell: bash
+        shell: msys2 {0}
         env:
           FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '6.1.1' }}
         run: |
-          export MSYS2_PATH_TYPE=inherit
-          export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
-
-          /c/msys64/usr/bin/pacman -S --noconfirm --needed \
-            mingw-w64-x86_64-gcc \
-            mingw-w64-x86_64-nasm \
-            mingw-w64-x86_64-pkg-config \
-            diffutils \
-            make \
-            tar \
-            xz \
-            curl \
-            zip
-
+          set -euo pipefail
           curl -sSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o ffmpeg.tar.xz
           tar -xf ffmpeg.tar.xz
           cd "ffmpeg-${FFMPEG_VERSION}"
@@ -68,7 +72,7 @@ jobs:
           make install
 
       - name: Package Archive
-        shell: bash
+        shell: msys2 {0}
         env:
           FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '6.1.1' }}
         run: |
@@ -98,7 +102,7 @@ jobs:
 
           mkdir -p build/dist
           cd "$ARCHIVE_DIR"
-          /c/msys64/usr/bin/zip -9 -r "../../../build/dist/ffmpeg-${FFMPEG_VERSION}-win32-x64.zip" .
+          zip -9 -r "../../../build/dist/ffmpeg-${FFMPEG_VERSION}-win32-x64.zip" .
 
       - name: Upload to Release
         shell: bash
@@ -117,14 +121,14 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            runner: macos-latest
             arch: arm64
             min_os: "11.0"
+            extra_cc: ""
           - target: darwin-x64
-            runner: macos-13
             arch: x86_64
             min_os: "10.15"
-    runs-on: ${{ matrix.runner }}
+            extra_cc: "--cc=clang -arch x86_64"
+    runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -141,10 +145,17 @@ jobs:
           curl -sSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o ffmpeg.tar.xz
           tar -xf ffmpeg.tar.xz
           cd "ffmpeg-${FFMPEG_VERSION}"
+
+          EXTRA_FLAGS=()
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            EXTRA_FLAGS+=(--cc="clang -arch x86_64" --as="clang -arch x86_64")
+          fi
+
           ./configure \
             --prefix="$PWD/dist" \
             --arch="${{ matrix.arch }}" \
             --target-os=darwin \
+            "${EXTRA_FLAGS[@]}" \
             --disable-shared \
             --enable-static \
             --disable-doc \
@@ -153,8 +164,9 @@ jobs:
             --enable-ffprobe \
             --disable-gpl \
             --disable-nonfree \
-            --extra-cflags="-O3 -mmacosx-version-min=${{ matrix.min_os }}" \
-            --extra-ldflags="-mmacosx-version-min=${{ matrix.min_os }}"
+            --extra-cflags="-O3 -arch ${{ matrix.arch }} -mmacosx-version-min=${{ matrix.min_os }}" \
+            --extra-ldflags="-arch ${{ matrix.arch }} -mmacosx-version-min=${{ matrix.min_os }}"
+
           make -j"$(sysctl -n hw.ncpu)"
           make install
 
