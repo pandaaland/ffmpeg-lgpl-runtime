@@ -55,7 +55,6 @@ jobs:
             --prefix="$PWD/dist" \
             --arch=x86_64 \
             --target-os=mingw32 \
-            --cross-prefix=x86_64-w64-mingw32- \
             --pkg-config=pkg-config \
             --disable-shared \
             --enable-static \
