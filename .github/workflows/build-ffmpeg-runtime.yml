@@ -1,0 +1,203 @@
+name: Build FFmpeg LGPL Runtimes
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version:
+        description: "FFmpeg version"
+        required: true
+        default: "6.1.1"
+      release_tag:
+        description: "GitHub Release tag"
+        required: true
+        default: "v6.1.1"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build (win32-x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build FFmpeg with MSYS2
+        shell: bash
+        env:
+          FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '6.1.1' }}
+        run: |
+          export MSYS2_PATH_TYPE=inherit
+          export PATH="/c/msys64/mingw64/bin:/c/msys64/usr/bin:$PATH"
+
+          /c/msys64/usr/bin/pacman -S --noconfirm --needed \
+            mingw-w64-x86_64-gcc \
+            mingw-w64-x86_64-nasm \
+            mingw-w64-x86_64-pkg-config \
+            diffutils \
+            make \
+            tar \
+            xz \
+            curl \
+            zip
+
+          curl -sSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o ffmpeg.tar.xz
+          tar -xf ffmpeg.tar.xz
+          cd "ffmpeg-${FFMPEG_VERSION}"
+
+          ./configure \
+            --prefix="$PWD/dist" \
+            --arch=x86_64 \
+            --target-os=mingw32 \
+            --cross-prefix=x86_64-w64-mingw32- \
+            --pkg-config=pkg-config \
+            --disable-shared \
+            --enable-static \
+            --disable-doc \
+            --disable-ffplay \
+            --enable-ffmpeg \
+            --enable-ffprobe \
+            --disable-gpl \
+            --disable-nonfree \
+            --extra-cflags="-O3 -static" \
+            --extra-ldflags="-static"
+
+          make -j"$(nproc)"
+          make install
+
+      - name: Package Archive
+        shell: bash
+        env:
+          FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '6.1.1' }}
+        run: |
+          set -euo pipefail
+          ARCHIVE_DIR="build/runtime-package/ffmpeg-${FFMPEG_VERSION}-win32-x64"
+          mkdir -p "$ARCHIVE_DIR"
+          cp "ffmpeg-${FFMPEG_VERSION}/dist/bin/ffmpeg.exe" "$ARCHIVE_DIR/"
+          cp "ffmpeg-${FFMPEG_VERSION}/dist/bin/ffprobe.exe" "$ARCHIVE_DIR/"
+          cp "ffmpeg-${FFMPEG_VERSION}/LICENSE.md" "$ARCHIVE_DIR/LICENSE"
+          cp "ffmpeg-${FFMPEG_VERSION}/COPYING.LGPLv2.1" "$ARCHIVE_DIR/COPYING.LGPLv2.1"
+
+          cat << 'EOF' > "$ARCHIVE_DIR/SOURCE.txt"
+          FFmpeg version: 6.1.1
+          License: LGPL-2.1-or-later
+          Source tarball: https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz
+          Build workflow: https://github.com/pandaaland/ffmpeg-lgpl-runtime/blob/main/.github/workflows/build-ffmpeg-runtime.yml
+          EOF
+          sed -i "s/6.1.1/${FFMPEG_VERSION}/g" "$ARCHIVE_DIR/SOURCE.txt"
+
+          cat << 'EOF' > "$ARCHIVE_DIR/THIRD-PARTY-NOTICES"
+          FFmpeg
+          This binary is built from the official FFmpeg source code and distributed under the terms of the GNU Lesser General Public License version 2.1.
+          It does not include any GPL or non-free external libraries.
+
+          Source code: https://ffmpeg.org/releases/
+          EOF
+
+          mkdir -p build/dist
+          cd "$ARCHIVE_DIR"
+          /c/msys64/usr/bin/zip -9 -r "../../../build/dist/ffmpeg-${FFMPEG_VERSION}-win32-x64.zip" .
+
+      - name: Upload to Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || 'v6.1.1' }}
+          FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '6.1.1' }}
+        run: |
+          gh release upload "$RELEASE_TAG" "build/dist/ffmpeg-${FFMPEG_VERSION}-win32-x64.zip" --clobber --repo "$GITHUB_REPOSITORY" || \
+          gh release create "$RELEASE_TAG" "build/dist/ffmpeg-${FFMPEG_VERSION}-win32-x64.zip" --title "FFmpeg LGPL Runtime $RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+
+  build-macos:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-latest
+            arch: arm64
+            min_os: "11.0"
+          - target: darwin-x64
+            runner: macos-13
+            arch: x86_64
+            min_os: "10.15"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install nasm
+
+      - name: Build FFmpeg
+        env:
+          FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '6.1.1' }}
+        run: |
+          set -euo pipefail
+          curl -sSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" -o ffmpeg.tar.xz
+          tar -xf ffmpeg.tar.xz
+          cd "ffmpeg-${FFMPEG_VERSION}"
+          ./configure \
+            --prefix="$PWD/dist" \
+            --arch="${{ matrix.arch }}" \
+            --target-os=darwin \
+            --disable-shared \
+            --enable-static \
+            --disable-doc \
+            --disable-ffplay \
+            --enable-ffmpeg \
+            --enable-ffprobe \
+            --disable-gpl \
+            --disable-nonfree \
+            --extra-cflags="-O3 -mmacosx-version-min=${{ matrix.min_os }}" \
+            --extra-ldflags="-mmacosx-version-min=${{ matrix.min_os }}"
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+
+      - name: Package Archive
+        env:
+          FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '6.1.1' }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          ARCHIVE_DIR="build/runtime-package/ffmpeg-${FFMPEG_VERSION}-${TARGET}"
+          mkdir -p "$ARCHIVE_DIR"
+          cp "ffmpeg-${FFMPEG_VERSION}/dist/bin/ffmpeg" "$ARCHIVE_DIR/"
+          cp "ffmpeg-${FFMPEG_VERSION}/dist/bin/ffprobe" "$ARCHIVE_DIR/"
+          chmod +x "$ARCHIVE_DIR/ffmpeg" "$ARCHIVE_DIR/ffprobe"
+          cp "ffmpeg-${FFMPEG_VERSION}/LICENSE.md" "$ARCHIVE_DIR/LICENSE"
+          cp "ffmpeg-${FFMPEG_VERSION}/COPYING.LGPLv2.1" "$ARCHIVE_DIR/COPYING.LGPLv2.1"
+
+          cat << 'EOF' > "$ARCHIVE_DIR/SOURCE.txt"
+          FFmpeg version: 6.1.1
+          License: LGPL-2.1-or-later
+          Source tarball: https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz
+          Build workflow: https://github.com/pandaaland/ffmpeg-lgpl-runtime/blob/main/.github/workflows/build-ffmpeg-runtime.yml
+          EOF
+          sed -i '' "s/6.1.1/${FFMPEG_VERSION}/g" "$ARCHIVE_DIR/SOURCE.txt"
+
+          cat << 'EOF' > "$ARCHIVE_DIR/THIRD-PARTY-NOTICES"
+          FFmpeg
+          This binary is built from the official FFmpeg source code and distributed under the terms of the GNU Lesser General Public License version 2.1.
+          It does not include any GPL or non-free external libraries.
+
+          Source code: https://ffmpeg.org/releases/
+          EOF
+
+          mkdir -p build/dist
+          cd "$ARCHIVE_DIR"
+          zip -9 -r "../../../build/dist/ffmpeg-${FFMPEG_VERSION}-${TARGET}.zip" .
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || 'v6.1.1' }}
+          FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '6.1.1' }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          gh release upload "$RELEASE_TAG" "build/dist/ffmpeg-${FFMPEG_VERSION}-${TARGET}.zip" --clobber --repo "$GITHUB_REPOSITORY" || \
+          gh release create "$RELEASE_TAG" "build/dist/ffmpeg-${FFMPEG_VERSION}-${TARGET}.zip" --title "FFmpeg LGPL Runtime $RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
